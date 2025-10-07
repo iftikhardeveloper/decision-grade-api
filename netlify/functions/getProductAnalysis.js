@@ -88,8 +88,7 @@ exports.handler = async function (event, context) {
   try {
     // --- Call the Gemini API ---
     const genAI = new GoogleGenerativeAI(API_KEY);
-   const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
+const model = genAI.getGenerativeModel({ model: "gemini-1.0-pro" });
     const result = await model.generateContent(prompt);
     const response = await result.response;
     let text = response.text();
