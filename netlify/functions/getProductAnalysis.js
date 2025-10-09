@@ -7,13 +7,14 @@ async function callGenerativeAI(apiKey, modelName, prompt) {
   const result = await model.generateContent(prompt);
   const response = await result.response;
   let text = response.text();
-  // Clean up the response to ensure it's valid JSON
   text = text.replace(/```json/g, '').replace(/```/g, '').trim();
   return JSON.parse(text);
 }
 
+// Helper promise for our smart timeout
+const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Request timed out")), ms));
+
 exports.handler = async function (event, context) {
-  // Standard headers for CORS
   const headers = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'POST, OPTIONS' };
   if (event.httpMethod === 'OPTIONS') { return { statusCode: 204, headers, body: '' }; }
 
@@ -21,65 +22,42 @@ exports.handler = async function (event, context) {
   if (!API_KEY) { return { statusCode: 500, headers, body: JSON.stringify({ error: "API key is not configured." })}; }
 
   let body;
-  try {
-    body = JSON.parse(event.body);
-  } catch (error) {
-    return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid request body." })};
-  }
+  try { body = JSON.parse(event.body); } catch (e) { return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid request body." })}; }
   
   const { productName, targetMarket, businessModel } = body;
   if (!productName) { return { statusCode: 400, headers, body: JSON.stringify({ error: "productName is required." })}; }
 
-  // Define the factors for the AI prompt
-  const factors = {
-    riskScore: "A score from 1 (very risky) to 10 (very safe). Considers legal, safety, and financial risks.",
-    seasonality: "A score from 0 (not seasonal) to 100 (extremely seasonal).",
-    differentiation: "A score from 0 (commodity) to 10 (highly unique and defensible).",
-    audienceSize: "A score from 0 (niche) to 10 (massive, mainstream audience).",
-    marketingAngle: "A score from 0 (hard to market) to 10 (many strong, creative marketing angles).",
-    urgency: "A score from 0 (luxury/optional) to 10 (solves an urgent, recurring problem).",
-    longevity: "A score from 0 (fad product) to 10 (timeless, long-term demand).",
-    brandingPotential: "A score from 0 (unbrandable) to 10 (strong potential to build a memorable brand).",
-    complianceRisk: "A score from 0 (no risk) to 100 (very high risk of regulatory or platform compliance issues)."
-  };
-
-  // The main prompt sent to the AI
   const prompt = `
     You are an expert e-commerce product research analyst.
     Analyze the product named "${productName}" with the following business context:
     - Target Market: "${targetMarket || 'USA'}"
     - Business Model: "${businessModel || 'Amazon FBA'}"
-
-    First, provide a high-level summary with 3 pros and 3 cons for this product idea in bullet points.
-    Second, provide a detailed analysis for the 9 factors listed below. For each factor, provide a "score" (number) and a brief "reason" (string).
-
-    The factors to analyze are:
-    ${Object.entries(factors).map(([key, desc]) => `- ${key}: ${desc}`).join('\n')}
-
+    First, provide a high-level summary with 3 pros and 3 cons.
+    Second, provide a detailed analysis for 9 factors. For each, provide a "score" (number) and "reason" (string).
+    The factors are: riskScore (1-10 safe), seasonality (0-100 seasonal), differentiation (0-10 unique), audienceSize (0-10 massive), marketingAngle (0-10 strong), urgency (0-10 urgent), longevity (0-10 timeless), brandingPotential (0-10 strong), complianceRisk (0-100 high-risk).
     Your entire response MUST be a single, valid JSON object with no other text.
-    The JSON must have three top-level keys: "pros", "cons", and "factors".
-    - "pros" and "cons" must be arrays of strings.
-    - "factors" must be an object where each key is a factor name.
-    - The value for each factor must be an object with a "score" and a "reason".
+    The JSON must have "pros" (array of strings), "cons" (array of strings), and "factors" (an object).
+    Inside "factors", each factor must have a "score" and "reason".
   `;
 
   try {
     let data;
-    // --- START OF THE FALLBACK CHAIN LOGIC ---
+    const primaryModel = "gemini-2.5-pro";
+    const fallbackModel = "gemini-2.5-flash";
+    const TIMEOUT_MS = 9000; // 9 seconds
+
     try {
-      console.log("Attempt 1: Trying primary model (gemini-2.5-pro)");
-      data = await callGenerativeAI(API_KEY, "gemini-2.5-pro", prompt);
-    } catch (primaryError) {
-      console.warn("Primary model failed. Trying first backup (gemini-2.5-flash). Error:", primaryError.message);
-      try {
-        data = await callGenerativeAI(API_KEY, "gemini-2.5-flash", prompt);
-      } catch (secondaryError) {
-        console.warn("First backup failed. Trying second backup (gemini-2.0-flash). Error:", secondaryError.message);
-        // This is the final attempt. If it fails, the outer catch block will handle it.
-        data = await callGenerativeAI(API_KEY, "gemini-2.0-flash", prompt);
-      }
+      console.log(`Attempt 1: Trying primary model (${primaryModel}) with a ${TIMEOUT_MS/1000}s timeout.`);
+      // Race the API call against our timer
+      data = await Promise.race([
+        callGenerativeAI(API_KEY, primaryModel, prompt),
+        timeout(TIMEOUT_MS)
+      ]);
+    } catch (error) {
+      console.warn(`Primary model failed or timed out. Reason: ${error.message}. Trying fallback model (${fallbackModel}).`);
+      // If the primary fails for any reason (timeout or other error), try the fallback.
+      data = await callGenerativeAI(API_KEY, fallbackModel, prompt);
     }
-    // --- END OF THE FALLBACK CHAIN LOGIC ---
 
     return { statusCode: 200, headers, body: JSON.stringify(data) };
 
